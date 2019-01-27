@@ -59,6 +59,10 @@ choice
 	help
 	  Specific CPU variant to use
 
+config BR2_arm_generic
+	bool "generic"
+	select BR2_ARM_CPU_HAS_ARM
+	select BR2_ARCH_HAS_MMU_OPTIONAL
 config BR2_arm920t
 	bool "arm920t"
 	select BR2_ARM_CPU_HAS_ARM
