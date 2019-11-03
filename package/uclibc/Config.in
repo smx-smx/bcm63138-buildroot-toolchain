@@ -37,6 +37,13 @@ choice
 		select BR2_UCLIBC_VERSION_SUPPORTS_NPTL \
 		       if !BR2_m68k && !BR2_x86_i386
 
+	config BR2_UCLIBC_BCM63138
+		bool "uclibc-brcm63138"
+		select BR2_UCLIBC_VERSION_SUPPORTS_LINUXTHREADS
+		select BR2_UCLIBC_VERSION_SUPPORTS_LINUXTHREADS_OLD
+		select BR2_UCLIBC_VERSION_SUPPORTS_NPTL if !BR2_x86_i386
+		depends on !(BR2_arc || BR2_mips64 || BR2_mips64el || BR2_xtensa)
+	
 	config BR2_UCLIBC_VERSION_SNAPSHOT
 		bool "daily snapshot"
 		select BR2_UCLIBC_VERSION_SUPPORTS_LINUXTHREADS if !BR2_xtensa
@@ -46,6 +53,12 @@ choice
 		depends on !(BR2_arc || BR2_mips64 || BR2_mips64el)
 
 endchoice
+
+choice
+	prompt "BCM63138 target"
+	depends on BR2_UCLIBC_BCM63138
+endchoice
+
 
 config BR2_USE_UCLIBC_SNAPSHOT
 	string "Date (yyyymmdd) of snapshot or 'snapshot' for latest"
