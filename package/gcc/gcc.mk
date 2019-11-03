@@ -10,25 +10,23 @@
 
 GCC_VERSION = $(call qstrip,$(BR2_GCC_VERSION))
 
-ifeq ($(BR2_GCC_VERSION_ARC),y)
+ifeq ($(BR2_arc),y)
 GCC_SITE = $(call github,foss-for-synopsys-dwc-arc-processors,gcc,$(GCC_VERSION))
-GCC_SOURCE = gcc-$(GCC_VERSION).tar.gz
-else ifeq ($(BR2_GCC_VERSION_OR1K),y)
-GCC_SITE = $(call github,openrisc,or1k-gcc,$(GCC_VERSION))
-GCC_SOURCE = gcc-$(GCC_VERSION).tar.gz
-else ifeq ($(BR2_csky),y)
-GCC_SITE = $(call github,c-sky,gcc,$(GCC_VERSION))
 GCC_SOURCE = gcc-$(GCC_VERSION).tar.gz
 else
 GCC_SITE = $(BR2_GNU_MIRROR:/=)/gcc/gcc-$(GCC_VERSION)
-GCC_SOURCE = gcc-$(GCC_VERSION).tar.xz
 endif
+
+GCC_SOURCE ?= gcc-$(GCC_VERSION).tar.bz2
 
 #
 # Xtensa special hook
 #
+
+HOST_GCC_XTENSA_OVERLAY_TAR = $(BR2_XTENSA_OVERLAY_DIR)/xtensa_$(call qstrip,$(BR2_XTENSA_CORE_NAME)).tar
+
 define HOST_GCC_XTENSA_OVERLAY_EXTRACT
-	$(call arch-xtensa-overlay-extract,$(@D),gcc)
+	tar xf $(HOST_GCC_XTENSA_OVERLAY_TAR) -C $(@D) --strip-components=1 gcc
 endef
 
 #
@@ -43,23 +41,22 @@ endef
 endif
 endif
 
-# gcc is a special package, not named gcc, but gcc-initial and
-# gcc-final, but patches are nonetheless stored in package/gcc in the
-# tree, and potentially in BR2_GLOBAL_PATCH_DIR directories as well.
 define HOST_GCC_APPLY_PATCHES
-	for patchdir in \
-	    package/gcc/$(GCC_VERSION) \
-	    $(addsuffix /gcc/$(GCC_VERSION),$(call qstrip,$(BR2_GLOBAL_PATCH_DIR))) \
-	    $(addsuffix /gcc,$(call qstrip,$(BR2_GLOBAL_PATCH_DIR))) ; do \
-		if test -d $${patchdir}; then \
-			$(APPLY_PATCHES) $(@D) $${patchdir} \*.patch || exit 1; \
-		fi; \
-	done
+	if test -d package/gcc/$(GCC_VERSION); then \
+	  $(APPLY_PATCHES) $(@D) package/gcc/$(GCC_VERSION) \*.patch ; \
+	fi;
 	$(HOST_GCC_APPLY_POWERPC_PATCH)
 endef
 
 HOST_GCC_EXCLUDES = \
-	libjava/* libgo/*
+	libjava/* libgo/* \
+	gcc/testsuite/* libstdc++-v3/testsuite/*
+
+define HOST_GCC_FAKE_TESTSUITE
+	mkdir -p $(@D)/libstdc++-v3/testsuite/
+	echo "all:" > $(@D)/libstdc++-v3/testsuite/Makefile.in
+	echo "install:" >> $(@D)/libstdc++-v3/testsuite/Makefile.in
+endef
 
 #
 # Create 'build' directory and configure symlink
@@ -77,21 +74,18 @@ endef
 HOST_GCC_COMMON_DEPENDENCIES = \
 	host-binutils \
 	host-gmp \
-	host-mpc \
 	host-mpfr \
 	$(if $(BR2_BINFMT_FLAT),host-elf2flt)
 
 HOST_GCC_COMMON_CONF_OPTS = \
 	--target=$(GNU_TARGET_NAME) \
 	--with-sysroot=$(STAGING_DIR) \
-	--enable-__cxa_atexit \
+	--disable-__cxa_atexit \
 	--with-gnu-ld \
 	--disable-libssp \
 	--disable-multilib \
-	--disable-decimal-float \
-	--with-gmp=$(HOST_DIR) \
-	--with-mpc=$(HOST_DIR) \
-	--with-mpfr=$(HOST_DIR) \
+	--with-gmp=$(HOST_DIR)/usr \
+	--with-mpfr=$(HOST_DIR)/usr \
 	--with-pkgversion="Buildroot $(BR2_VERSION_FULL)" \
 	--with-bugurl="http://bugs.buildroot.net/"
 
@@ -103,6 +97,22 @@ HOST_GCC_COMMON_CONF_ENV = \
 GCC_COMMON_TARGET_CFLAGS = $(TARGET_CFLAGS)
 GCC_COMMON_TARGET_CXXFLAGS = $(TARGET_CXXFLAGS)
 
+# http://gcc.gnu.org/bugzilla/show_bug.cgi?id=43810
+# Workaround until it's fixed in 4.5.4 or later
+ifeq ($(ARCH),powerpc)
+ifeq ($(findstring x4.5.,x$(GCC_VERSION)),x4.5.)
+GCC_COMMON_TARGET_CFLAGS = $(filter-out -Os,$(GCC_COMMON_TARGET_CFLAGS))
+GCC_COMMON_TARGET_CXXFLAGS = $(filter-out -Os,$(GCC_COMMON_TARGET_CXXFLAGS))
+endif
+endif
+
+# Xtensa libgcc can't be built with -mauto-litpools
+# because of the trick used to generate .init/.fini sections.
+ifeq ($(BR2_xtensa),y)
+GCC_COMMON_TARGET_CFLAGS = $(filter-out -mauto-litpools,$(TARGET_CFLAGS))
+GCC_COMMON_TARGET_CXXFLAGS = $(filter-out -mauto-litpools,$(TARGET_CXXFLAGS))
+endif
+
 # Propagate options used for target software building to GCC target libs
 HOST_GCC_COMMON_CONF_ENV += CFLAGS_FOR_TARGET="$(GCC_COMMON_TARGET_CFLAGS)"
 HOST_GCC_COMMON_CONF_ENV += CXXFLAGS_FOR_TARGET="$(GCC_COMMON_TARGET_CXXFLAGS)"
@@ -112,15 +122,8 @@ ifeq ($(BR2_sparc_v8)$(BR2_sparc_leon3),y)
 HOST_GCC_COMMON_CONF_OPTS += --disable-libitm
 endif
 
-# libmpx uses secure_getenv and struct _libc_fpstate not present in musl
-ifeq ($(BR2_TOOLCHAIN_BUILDROOT_MUSL)$(BR2_TOOLCHAIN_GCC_AT_LEAST_6),yy)
-HOST_GCC_COMMON_CONF_OPTS += --disable-libmpx
-endif
-
-# quadmath support requires wchar
-ifeq ($(BR2_USE_WCHAR)$(BR2_TOOLCHAIN_HAS_LIBQUADMATH),yy)
-HOST_GCC_COMMON_CONF_OPTS += --enable-libquadmath
-else
+# gcc 4.6.x quadmath requires wchar
+ifneq ($(BR2_TOOLCHAIN_BUILDROOT_WCHAR),y)
 HOST_GCC_COMMON_CONF_OPTS += --disable-libquadmath
 endif
 
@@ -136,17 +139,20 @@ ifeq ($(BR2_sparc)$(BR2_sparc64),y)
 HOST_GCC_COMMON_CONF_OPTS += --disable-libsanitizer
 endif
 
-# TLS support is not needed on uClibc/no-thread and
-# uClibc/linux-threads, otherwise, for all other situations (glibc,
-# musl and uClibc/NPTL), we need it.
-ifeq ($(BR2_TOOLCHAIN_BUILDROOT_UCLIBC)$(BR2_PTHREADS)$(BR2_PTHREADS_NONE),yy)
-HOST_GCC_COMMON_CONF_OPTS += --disable-tls
-else
+ifeq ($(BR2_GCC_ENABLE_TLS),y)
 HOST_GCC_COMMON_CONF_OPTS += --enable-tls
+else
+HOST_GCC_COMMON_CONF_OPTS += --disable-tls
 endif
 
 ifeq ($(BR2_GCC_ENABLE_LTO),y)
 HOST_GCC_COMMON_CONF_OPTS += --enable-plugins --enable-lto
+endif
+
+ifeq ($(BR2_GCC_ENABLE_LIBMUDFLAP),y)
+HOST_GCC_COMMON_CONF_OPTS += --enable-libmudflap
+else
+HOST_GCC_COMMON_CONF_OPTS += --disable-libmudflap
 endif
 
 ifeq ($(BR2_PTHREADS_NONE),y)
@@ -158,17 +164,19 @@ else
 HOST_GCC_COMMON_CONF_OPTS += --enable-threads
 endif
 
-# gcc 5 doesn't need cloog any more, see
-# https://gcc.gnu.org/gcc-5/changes.html and we don't support graphite
-# on GCC 4.9.x, so only isl is needed.
+ifeq ($(BR2_GCC_NEEDS_MPC),y)
+HOST_GCC_COMMON_DEPENDENCIES += host-mpc
+HOST_GCC_COMMON_CONF_OPTS += --with-mpc=$(HOST_DIR)/usr
+endif
+
 ifeq ($(BR2_GCC_ENABLE_GRAPHITE),y)
-HOST_GCC_COMMON_DEPENDENCIES += host-isl
-HOST_GCC_COMMON_CONF_OPTS += --with-isl=$(HOST_DIR)
+HOST_GCC_COMMON_DEPENDENCIES += host-isl host-cloog
+HOST_GCC_COMMON_CONF_OPTS += --with-isl=$(HOST_DIR)/usr --with-cloog=$(HOST_DIR)/usr
 else
 HOST_GCC_COMMON_CONF_OPTS += --without-isl --without-cloog
 endif
 
-ifeq ($(BR2_arc)$(BR2_GCC_VERSION_OR1K),y)
+ifeq ($(BR2_arc),y)
 HOST_GCC_COMMON_DEPENDENCIES += host-flex host-bison
 endif
 
@@ -180,33 +188,36 @@ HOST_GCC_COMMON_CONF_OPTS += --with-float=soft
 endif
 endif
 
-# Determine arch/tune/abi/cpu options
-ifneq ($(GCC_TARGET_ARCH),)
-HOST_GCC_COMMON_CONF_OPTS += --with-arch="$(GCC_TARGET_ARCH)"
-endif
-ifneq ($(GCC_TARGET_ABI),)
-HOST_GCC_COMMON_CONF_OPTS += --with-abi="$(GCC_TARGET_ABI)"
-endif
-ifeq ($(BR2_TOOLCHAIN_HAS_MNAN_OPTION),y)
-ifneq ($(GCC_TARGET_NAN),)
-HOST_GCC_COMMON_CONF_OPTS += --with-nan="$(GCC_TARGET_NAN)"
-endif
-endif
-ifneq ($(GCC_TARGET_FP32_MODE),)
-HOST_GCC_COMMON_CONF_OPTS += --with-fp-32="$(GCC_TARGET_FP32_MODE)"
-endif
-ifneq ($(GCC_TARGET_CPU),)
-HOST_GCC_COMMON_CONF_OPTS += --with-cpu=$(GCC_TARGET_CPU)
+ifeq ($(BR2_GCC_SUPPORTS_FINEGRAINEDMTUNE),y)
+HOST_GCC_COMMON_CONF_OPTS += --disable-decimal-float
 endif
 
+# Determine arch/tune/abi/cpu options
+ifneq ($(call qstrip,$(BR2_GCC_TARGET_ARCH)),)
+HOST_GCC_COMMON_CONF_OPTS += --with-arch=$(BR2_GCC_TARGET_ARCH)
+endif
+ifneq ($(call qstrip,$(BR2_GCC_TARGET_ABI)),)
+HOST_GCC_COMMON_CONF_OPTS += --with-abi=$(BR2_GCC_TARGET_ABI)
+endif
+ifneq ($(call qstrip,$(BR2_GCC_TARGET_CPU)),)
+ifneq ($(call qstrip,$(BR2_GCC_TARGET_CPU_REVISION)),)
+HOST_GCC_COMMON_CONF_OPTS += --with-cpu=$(call qstrip,$(BR2_GCC_TARGET_CPU)-$(BR2_GCC_TARGET_CPU_REVISION))
+else
+HOST_GCC_COMMON_CONF_OPTS += --with-cpu=$(call qstrip,$(BR2_GCC_TARGET_CPU))
+endif
+endif
+
+GCC_TARGET_FPU = $(call qstrip,$(BR2_GCC_TARGET_FPU))
 ifneq ($(GCC_TARGET_FPU),)
 HOST_GCC_COMMON_CONF_OPTS += --with-fpu=$(GCC_TARGET_FPU)
 endif
 
+GCC_TARGET_FLOAT_ABI = $(call qstrip,$(BR2_GCC_TARGET_FLOAT_ABI))
 ifneq ($(GCC_TARGET_FLOAT_ABI),)
 HOST_GCC_COMMON_CONF_OPTS += --with-float=$(GCC_TARGET_FLOAT_ABI)
 endif
 
+GCC_TARGET_MODE = $(call qstrip,$(BR2_GCC_TARGET_MODE))
 ifneq ($(GCC_TARGET_MODE),)
 HOST_GCC_COMMON_CONF_OPTS += --with-mode=$(GCC_TARGET_MODE)
 endif
@@ -215,24 +226,6 @@ endif
 ifeq ($(BR2_powerpc_SPE),y)
 HOST_GCC_COMMON_CONF_OPTS += \
 	--enable-e500_double \
-	--with-long-double-128
-endif
-
-# PowerPC64 big endian by default uses the elfv1 ABI, and PowerPC 64
-# little endian by default uses the elfv2 ABI. However, musl has
-# decided to use the elfv2 ABI for both, so we force the elfv2 ABI for
-# Power64 big endian when the selected C library is musl.
-ifeq ($(BR2_TOOLCHAIN_USES_MUSL)$(BR2_powerpc64),yy)
-HOST_GCC_COMMON_CONF_OPTS += \
-	--with-abi=elfv2 \
-	--without-long-double-128
-endif
-
-# Since glibc >= 2.26, poerpc64le requires double/long double which
-# requires at least gcc 6.2.
-# See sysdeps/powerpc/powerpc64le/configure.ac
-ifeq ($(BR2_TOOLCHAIN_USES_GLIBC)$(BR2_TOOLCHAIN_GCC_AT_LEAST_6)$(BR2_powerpc64le),yyy)
-HOST_GCC_COMMON_CONF_OPTS += \
 	--with-long-double-128
 endif
 
@@ -249,22 +242,16 @@ HOST_GCC_COMMON_MAKE_OPTS = \
 	gcc_cv_libc_provides_ssp=$(if $(BR2_TOOLCHAIN_HAS_SSP),yes,no)
 
 ifeq ($(BR2_CCACHE),y)
-HOST_GCC_COMMON_CCACHE_HASH_FILES += $(GCC_DL_DIR)/$(GCC_SOURCE)
-
-# Cfr. PATCH_BASE_DIRS in .stamp_patched, but we catch both versioned
-# and unversioned patches unconditionally. Moreover, to facilitate the
-# addition of gcc patches in BR2_GLOBAL_PATCH_DIR, we allow them to be
-# stored in a sub-directory called 'gcc' even if it's not technically
-# the name of the package.
+HOST_GCC_COMMON_CCACHE_HASH_FILES += $(DL_DIR)/$(GCC_SOURCE)
+# Cfr. PATCH_BASE_DIRS in .stamp_patched, but we catch both versioned and
+# unversioned patches unconditionally
 HOST_GCC_COMMON_CCACHE_HASH_FILES += \
 	$(sort $(wildcard \
 		package/gcc/$(GCC_VERSION)/*.patch \
-		$(addsuffix /$($(PKG)_RAWNAME)/$(GCC_VERSION)/*.patch,$(call qstrip,$(BR2_GLOBAL_PATCH_DIR))) \
-		$(addsuffix /$($(PKG)_RAWNAME)/*.patch,$(call qstrip,$(BR2_GLOBAL_PATCH_DIR))) \
-		$(addsuffix /gcc/$(GCC_VERSION)/*.patch,$(call qstrip,$(BR2_GLOBAL_PATCH_DIR))) \
-		$(addsuffix /gcc/*.patch,$(call qstrip,$(BR2_GLOBAL_PATCH_DIR)))))
+		$(addsuffix $((PKG)_RAWNAME)/$(GCC_VERSION)/*.patch,$(call qstrip,$(BR2_GLOBAL_PATCH_DIR))) \
+		$(addsuffix $((PKG)_RAWNAME)/*.patch,$(call qstrip,$(BR2_GLOBAL_PATCH_DIR)))))
 ifeq ($(BR2_xtensa),y)
-HOST_GCC_COMMON_CCACHE_HASH_FILES += $(ARCH_XTENSA_OVERLAY_TAR)
+HOST_GCC_COMMON_CCACHE_HASH_FILES += $(HOST_GCC_XTENSA_OVERLAY_TAR)
 endif
 ifeq ($(ARCH),powerpc)
 ifneq ($(BR2_SOFT_FLOAT),)
@@ -288,12 +275,10 @@ endif # BR2_CCACHE
 # used. However, we should not add the toolchain wrapper for them, and they
 # match the *cc-* pattern. Therefore, an additional case is added for *-ar,
 # *-ranlib and *-nm.
-# According to gfortran manpage, it supports all options supported by gcc, so
-# add gfortran to the list of the program called via the Buildroot wrapper.
 # Avoid that a .br_real is symlinked a second time.
 # Also create <arch>-linux-<tool> symlinks.
 define HOST_GCC_INSTALL_WRAPPER_AND_SIMPLE_SYMLINKS
-	$(Q)cd $(HOST_DIR)/bin; \
+	$(Q)cd $(HOST_DIR)/usr/bin; \
 	for i in $(GNU_TARGET_NAME)-*; do \
 		case "$$i" in \
 		*.br_real) \
@@ -301,7 +286,7 @@ define HOST_GCC_INSTALL_WRAPPER_AND_SIMPLE_SYMLINKS
 		*-ar|*-ranlib|*-nm) \
 			ln -snf $$i $(ARCH)-linux$${i##$(GNU_TARGET_NAME)}; \
 			;; \
-		*cc|*cc-*|*++|*++-*|*cpp|*-gfortran) \
+		*cc|*cc-*|*++|*++-*|*cpp) \
 			rm -f $$i.br_real; \
 			mv $$i $$i.br_real; \
 			ln -sf toolchain-wrapper $$i; \
